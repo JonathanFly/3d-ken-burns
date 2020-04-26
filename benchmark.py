@@ -10,6 +10,7 @@ import flask
 import getopt
 import gevent
 import gevent.pywsgi
+import glob
 import h5py
 import io
 import math
@@ -38,7 +39,7 @@ torch.backends.cudnn.enabled = True # make sure to use cudnn for computational p
 
 ##########################################################
 
-objectCommon = {}
+objCommon = {}
 
 exec(open('./common.py', 'r').read())
 
@@ -77,16 +78,16 @@ if os.path.isfile('./benchmark-ibims-scripts.zip') == False:
 	urllib.request.urlretrieve('ftp://m1455541:m1455541@dataserv.ub.tum.de/evaluation_scripts.zip', './benchmark-ibims-scripts.zip')
 # end
 
-objectZip = zipfile.ZipFile('./benchmark-ibims-scripts.zip', 'r')
+objZip = zipfile.ZipFile('./benchmark-ibims-scripts.zip', 'r')
 
-strScript = objectZip.read('evaluation_scripts/evaluate_ibims_error_metrics.py').decode('utf-8')
+strScript = objZip.read('evaluation_scripts/evaluate_ibims_error_metrics.py').decode('utf-8')
 strScript = strScript.replace('# exclude masked invalid and missing measurements', 'idx = gt!=0')
 strScript = strScript.replace('gt=gt[gt!=0]', 'gt=gt[idx]')
 strScript = strScript.replace('pred=pred[pred!=0]', 'pred=pred[idx]')
 
 exec(strScript)
 
-objectZip.close()
+objZip.close()
 
 ##########################################################
 
@@ -94,94 +95,51 @@ if os.path.isfile('./benchmark-ibims-data.zip') == False:
 	urllib.request.urlretrieve('ftp://m1455541:m1455541@dataserv.ub.tum.de/ibims1_core_mat.zip', './benchmark-ibims-data.zip')
 # end
 
-objectZip = zipfile.ZipFile('./benchmark-ibims-data.zip', 'r')
+objZip = zipfile.ZipFile('./benchmark-ibims-data.zip', 'r')
 
-for intMat, strMat in enumerate([ strFile for strFile in objectZip.namelist() if strFile.endswith('.mat') ]):
+for intMat, strMat in enumerate([ strFile for strFile in objZip.namelist() if strFile.endswith('.mat') ]):
 	print(intMat, strMat)
 
-	with open('./temp.mat', 'wb') as objectFile:
-		objectFile.write(objectZip.read(strMat))
-	# end
+	objMat = scipy.io.loadmat(io.BytesIO(objZip.read(strMat)))['data']
 
-	objectMat = scipy.io.loadmat('./temp.mat')['data']
+	tenImage = torch.FloatTensor(numpy.ascontiguousarray(objMat['rgb'][0][0][:, :, ::-1]).transpose(2, 0, 1)).unsqueeze(0).cuda() / 255.0
+	tenDisparity = disparity_estimation(tenImage)
+	tenDisparity = disparity_refinement(torch.nn.functional.interpolate(input=tenImage, size=(tenDisparity.shape[2] * 4, tenDisparity.shape[3] * 4), mode='bilinear', align_corners=False), tenDisparity)
+	tenDisparity = torch.nn.functional.interpolate(input=tenDisparity, size=(tenImage.shape[2], tenImage.shape[3]), mode='bilinear', align_corners=False) * (max(tenImage.shape[2], tenImage.shape[3]) / 256.0)
+	tenDepth = 1.0 / tenDisparity
 
-	os.remove('./temp.mat')
+	valid = objMat['mask_transp'][0][0] * objMat['mask_invalid'][0][0] * (objMat['depth'][0][0] != 0.0)
 
-	rgb = objectMat['rgb'][0][0]
-	depth = objectMat['depth'][0][0]
-	edges = objectMat['edges'][0][0]
-	calib = objectMat['calib'][0][0]
+	pred = tenDepth[0, 0, :, :].cpu().numpy()
+	npyLstsqa = numpy.stack([pred[valid == 1.0].flatten(), numpy.full([int((valid == 1.0).sum().item())], 1.0, numpy.float32)], 1)
+	npyLstsqb = objMat['depth'][0][0][valid == 1.0].flatten()
+	npyScalebias = numpy.linalg.lstsq(npyLstsqa, npyLstsqb, None)[0]
+	pred = (pred * npyScalebias[0]) + npyScalebias[1]
 
-	tensorImage = torch.FloatTensor(rgb[:, :, ::-1].copy().transpose(2, 0, 1)).unsqueeze(0).cuda() / 255.0
-	tensorDisparity = disparity_estimation(tensorImage)
-	tensorDisparity = disparity_refinement(torch.nn.functional.interpolate(input=tensorImage, size=(tensorDisparity.size(2) * 4, tensorDisparity.size(3) * 4), mode='bilinear', align_corners=False), tensorDisparity)
-	tensorDisparity = torch.nn.functional.interpolate(input=tensorDisparity, size=(tensorImage.size(2), tensorImage.size(3)), mode='bilinear', align_corners=False) * (max(tensorImage.size(2), tensorImage.size(3)) / 256.0)
-	tensorDepth = 1.0 / tensorDisparity
+	abs_rel[intMat], sq_rel[intMat], rms[intMat], log10[intMat], thr1[intMat], thr2[intMat], thr3[intMat] = compute_global_errors((objMat['depth'][0][0] * valid).flatten(), (pred * valid).flatten())
+	dde_0[intMat], dde_m[intMat], dde_p[intMat] = compute_directed_depth_error((objMat['depth'][0][0] * valid).flatten(), (pred * valid).flatten(), 3.0)
+	dbe_acc[intMat], dbe_com[intMat] = compute_depth_boundary_error(objMat['edges'][0][0], pred)
 
-	pred = tensorDepth[0, 0, :, :].cpu().numpy()
-	pred_org = pred.copy()
-
-	mask_transp = objectMat['mask_transp'][0][0]
-	mask_invalid = objectMat['mask_invalid'][0][0]
-	mask_missing = depth.copy(); mask_missing[mask_missing != 0.0] = 1
-	mask_valid = mask_transp * mask_invalid * mask_missing
-
-	gt = depth * mask_valid
-	pred = pred * mask_valid
-
-	if True:
-		numpyA = numpy.zeros([ pred.shape[0] * pred.shape[1], 2 ], numpy.float32)
-		numpyB = numpy.zeros([ pred.shape[0] * pred.shape[1] ], numpy.float32)
-
-		intConstraint = 0
-		for intY in range(pred.shape[0]):
-			for intX in range(pred.shape[1]):
-				if mask_valid[intY, intX] == 1.0:
-					numpyA[intConstraint, 0] = pred[intY, intX]
-					numpyA[intConstraint, 1] = 1.0
-					numpyB[intConstraint] = gt[intY, intX]
-
-					intConstraint += 1
-				# end
-			# end
-		# end
-
-		numpyScalebias = numpy.linalg.lstsq(numpyA[0:intConstraint, :], numpyB[0:intConstraint], None)[0]
-
-		pred = (pred * numpyScalebias[0]) + numpyScalebias[1]
-		pred_org = (pred_org * numpyScalebias[0]) + numpyScalebias[1]
-	# end
-
-	abs_rel[intMat], sq_rel[intMat], rms[intMat], log10[intMat], thr1[intMat], thr2[intMat], thr3[intMat] = compute_global_errors(gt.flatten(), pred.flatten())
-	dde_0[intMat], dde_m[intMat], dde_p[intMat] = compute_directed_depth_error(gt.flatten(), pred.flatten(), 3.0)
-	dbe_acc[intMat], dbe_com[intMat] = compute_depth_boundary_error(edges, pred_org)
-
-	mask_wall = objectMat['mask_wall'][0][0]*mask_valid
-	paras_wall = objectMat['mask_wall_paras'][0][0]
-	if paras_wall.size > 0:
-		pe_fla_wall, pe_ori_wall = compute_planarity_error(gt, pred, paras_wall, mask_wall, calib)
+	if objMat['mask_wall_paras'][0][0].size > 0:
+		pe_fla_wall, pe_ori_wall = compute_planarity_error(objMat['depth'][0][0] * valid, pred * valid, objMat['mask_wall_paras'][0][0], objMat['mask_wall'][0][0] * valid, objMat['calib'][0][0])
 		pe_fla.extend(pe_fla_wall.tolist())
 		pe_ori.extend(pe_ori_wall.tolist())
 	# end
 
-	mask_table = objectMat['mask_table'][0][0]*mask_valid
-	paras_table = objectMat['mask_table_paras'][0][0]
-	if paras_table.size > 0:
-		pe_fla_table, pe_ori_table = compute_planarity_error(gt, pred, paras_table, mask_table, calib)
+	if objMat['mask_table_paras'][0][0].size > 0:
+		pe_fla_table, pe_ori_table = compute_planarity_error(objMat['depth'][0][0] * valid, pred * valid, objMat['mask_table_paras'][0][0], objMat['mask_table'][0][0] * valid, objMat['calib'][0][0])
 		pe_fla.extend(pe_fla_table.tolist())
 		pe_ori.extend(pe_ori_table.tolist())
 	# end
 
-	mask_floor = objectMat['mask_floor'][0][0]*mask_valid
-	paras_floor = objectMat['mask_floor_paras'][0][0]
-	if paras_floor.size > 0:
-		pe_fla_floor, pe_ori_floor = compute_planarity_error(gt, pred, paras_floor, mask_floor, calib)
+	if objMat['mask_floor_paras'][0][0].size > 0:
+		pe_fla_floor, pe_ori_floor = compute_planarity_error(objMat['depth'][0][0] * valid, pred * valid, objMat['mask_floor_paras'][0][0], objMat['mask_floor'][0][0] * valid, objMat['calib'][0][0])
 		pe_fla.extend(pe_fla_floor.tolist())
 		pe_ori.extend(pe_ori_floor.tolist())
 	# end
 # end
 
-objectZip.close()
+objZip.close()
 
 ##########################################################
 
