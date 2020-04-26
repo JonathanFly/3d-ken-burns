@@ -97,6 +97,4 @@ if __name__ == '__main__':
 		'boolInpaint': True
 	})
 
-
-	moviepy.editor.ImageSequenceClip(sequence=[ numpyFrame[:, :, ::-1] for numpyFrame in numpyResult + list(reversed(numpyResult))[1:] ], fps=arguments_strFps).write_videofile(arguments_strOut)
-
+	moviepy.editor.ImageSequenceClip(sequence=[ npyFrame[:, :, ::-1] for npyFrame in npyResult + list(reversed(npyResult))[1:] ], fps=25).write_videofile(arguments_strOut)
