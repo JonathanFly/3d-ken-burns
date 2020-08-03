@@ -1,5 +1,5 @@
+#You can edit this cell then click the play button to update the file. 
 #!/usr/bin/env python
-
 import torch
 import torchvision
 
@@ -10,6 +10,7 @@ import flask
 import getopt
 import gevent
 import gevent.pywsgi
+import glob
 import h5py
 import io
 import math
@@ -30,7 +31,7 @@ import zipfile
 
 ##########################################################
 
-assert(int(str('').join(torch.__version__.split('.')[0:3])) >= 120) # requires at least pytorch version 1.2.0
+assert(int(str('').join(torch.__version__.split('.')[0:2])) >= 12) # requires at least pytorch version 1.2.0
 
 torch.set_grad_enabled(False) # make sure to not compute gradients for computational performance
 
@@ -38,7 +39,7 @@ torch.backends.cudnn.enabled = True # make sure to use cudnn for computational p
 
 ##########################################################
 
-objectCommon = {}
+objCommon = {}
 
 exec(open('./common.py', 'r').read())
 
@@ -62,41 +63,46 @@ for strOption, strArgument in getopt.getopt(sys.argv[1:], '', [ strParameter[2:]
 	# end
 
 	##########################################################
+
 if __name__ == '__main__':
-	numpyImage = cv2.imread(filename=arguments_strIn, flags=cv2.IMREAD_COLOR)
+	npyImage = cv2.imread(filename=arguments_strIn, flags=cv2.IMREAD_COLOR)
 
-	intWidth = numpyImage.shape[1]
-	intHeight = numpyImage.shape[0]
+	intWidth = npyImage.shape[1]
+	intHeight = npyImage.shape[0]
 
-	dblRatio = float(intWidth) / float(intHeight)
+	fltRatio = float(intWidth) / float(intHeight)
 
-	process_load(numpyImage, {})
+	#intWidth = min(int(1024 * fltRatio), 1024)
+	#intHeight = min(int(1024 / fltRatio), 1024)
 
-	objectFrom = {
-	'dblCenterU': intWidth / 2.0, #You can change these but many settings will crash it
-	'dblCenterV': intHeight / 2.0, #You can change these but many settings will crash it
-	'intCropWidth': int(math.floor(0.98 * intWidth)),
-	'intCropHeight': int(math.floor(0.98 * intHeight))
+	#npyImage = cv2.resize(src=npyImage, dsize=(intWidth, intHeight), fx=0.0, fy=0.0, interpolation=cv2.INTER_AREA)
+
+	process_load(npyImage, {})
+
+	objFrom = {
+	'fltCenterU': intWidth / 2.0, #You can play with these but some settings will crash it or produce a bad video file
+	'fltCenterV': intHeight / 2.0, #You can play with these but some settings will crash it or produce a bad video file
+	'intCropWidth': int(math.floor(0.97 * intWidth)),
+	'intCropHeight': int(math.floor(0.97 * intHeight))
 	}
 
-	objectTo = process_autozoom({
-	#'dblCenterU': intWidth / 2.0, #Not sure of effect
-	#'dblCenterV': intHeight / 2.0, #Not sure of effect
-	'dblShift': 100.0, #original
-	#'dblShift': 10.0, #try this with large zooms
-	#'dblZoom': 40.25, #x50 zoom
-	'dblZoom': 1.25, #original
-	'objectFrom': objectFrom
+	objTo = process_autozoom({
+    #'fltCenterU': intWidth / 2.0, #Not sure of effect
+	#'fltCenterV': intHeight / 2.0, #Not sure of effect
+	'fltShift': 100.0,
+	#'fltShift': 10.0, # try this with large zooms
+	'fltZoom': 1.25,
+	#'fltZoom': 40.25, # 40x zoom
+	'objFrom': objFrom
 	})
 
-	numpyResult = process_kenburns({
-	#'dblSteps': numpy.linspace(0.0, 40.0, 800).tolist(), #example very large zoom, lot sof extra frames
-	'dblSteps': numpy.linspace(0.0, 1.0, 75).tolist(), #original settings
-	#'dblSteps': numpy.linspace(0.0, 20.0, 275).tolist(), # Zoom x20 and more frames 
-	'objectFrom': objectFrom,
-	'objectTo': objectTo,
+	npyResult = process_kenburns({
+	'fltSteps': numpy.linspace(0.0, 1.0, 75).tolist(),
+	#'fltSteps': numpy.linspace(0.0, 40.0, 800).tolist(), #example very large zoom, 800 frames
+	#'fltSteps': numpy.linspace(0.0, 20.0, 275).tolist(), # Zoom x20 and 275 frames 
+	'objFrom': objFrom,
+	'objTo': objTo,
 	'boolInpaint': True
 	})
 
-	moviepy.editor.ImageSequenceClip(sequence=[ numpyFrame[:, :, ::-1] for numpyFrame in numpyResult + list(reversed(numpyResult))[1:] ], fps=float(arguments_strFps)).write_videofile(arguments_strOut, bitrate=arguments_strBitRate)
-	# end
+	moviepy.editor.ImageSequenceClip(sequence=[ npyFrame[:, :, ::-1] for npyFrame in npyResult + list(reversed(npyResult))[1:] ], fps=int(arguments_strFps)).write_videofile(arguments_strOut, bitrate=arguments_strBitRate)
