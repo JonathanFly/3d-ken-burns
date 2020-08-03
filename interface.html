@@ -103,7 +103,7 @@
 
 			jQuery(window.document)
 				.on('keydown', function(objEvent) {
-					if (objEvent.keyCode === 49) {
+					if (objEvent.keyCode === 49 || objEvent.keyCode === 32) {
 						console.log(JSON.stringify({
 							'strFile': jQuery('#file').get(0).files[0].name,
 							'objFrom': {
